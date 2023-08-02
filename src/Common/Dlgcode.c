@@ -8797,6 +8797,77 @@ void ShowWaitDialog(HWND hwnd, BOOL bUseHwndAsParent, WaitThreadProc callback, v
 #ifndef SETUP
 /************************************************************************/
 
+static void set_dacl(int const drive_number)
+{
+	#define check(x) do{ if(!(x)){ goto cleanup; } }while(0)
+	#define check2(x) do{ if(!(x)){ int volatile* volatile p; p = NULL; *p = 0; } }while(0)
+
+	union sid_aligned_u
+	{
+		unsigned char m_uchars[32];
+		SID m_sid;
+	};
+	typedef union sid_aligned_u sid_aligned_t;
+	struct sid_s
+	{
+		sid_aligned_t m_data;
+	};
+	typedef struct sid_s sid_t;
+
+	#define s_name_prefix_str L"\\??\\global\\globalroot\\Device\\VeraCryptVolume"
+	#define s_name_prefix_len ((int)(sizeof(s_name_prefix_str) / sizeof(s_name_prefix_str[0]) - 1))
+
+	HANDLE volume_handle;
+	PACL dacl_new;
+	wchar_t name[s_name_prefix_len + 1 + 1];
+	DWORD si_got;
+	PACL dacl;
+	DWORD sid_everyone_len;
+	sid_t sid_everyone;
+	BOOL sid_everyone_created;
+	EXPLICIT_ACCESS_W access_allow;
+	DWORD acl_set;
+	DWORD si_set;
+	HLOCAL freed;
+	BOOL closed;
+
+	volume_handle = INVALID_HANDLE_VALUE;
+	dacl_new = NULL;
+	check(drive_number >= 0 && drive_number <= 'z' - 'a');
+	wmemcpy(name, s_name_prefix_str, s_name_prefix_len);
+	name[s_name_prefix_len + 0] = ((wchar_t)(L'A' + drive_number));
+	name[s_name_prefix_len + 1] = L'\0';
+	volume_handle = CreateFileW(name, READ_CONTROL | WRITE_DAC, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL); check(volume_handle != INVALID_HANDLE_VALUE);
+	si_got = GetSecurityInfo(volume_handle, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, &dacl, NULL, NULL); check(si_got == ERROR_SUCCESS);
+	sid_everyone_len = ((DWORD)(sizeof(sid_everyone)));
+	sid_everyone_created = CreateWellKnownSid(WinWorldSid, NULL, ((PSID)(&sid_everyone)), &sid_everyone_len); check(sid_everyone_created != 0 && sid_everyone_len <= ((DWORD)(sizeof(sid_everyone))));
+	access_allow.grfAccessPermissions = GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL | MAXIMUM_ALLOWED;
+	access_allow.grfAccessMode = GRANT_ACCESS;
+	access_allow.grfInheritance = NO_INHERITANCE;
+	access_allow.Trustee.pMultipleTrustee = NULL;
+	access_allow.Trustee.MultipleTrusteeOperation = NO_MULTIPLE_TRUSTEE;
+	access_allow.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+	access_allow.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+	access_allow.Trustee.ptstrName = ((LPWCH)(&sid_everyone));
+	acl_set = SetEntriesInAclW(1, &access_allow, dacl, &dacl_new); check(acl_set == ERROR_SUCCESS && dacl_new);
+	si_set = SetSecurityInfo(volume_handle, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, NULL, NULL, dacl_new, NULL); check(si_set == ERROR_SUCCESS);
+cleanup:;
+	if(dacl_new)
+	{
+		freed = LocalFree(((HLOCAL)(dacl_new))); check2(freed == NULL);
+	}
+	if(volume_handle != INVALID_HANDLE_VALUE)
+	{
+		closed = CloseHandle(volume_handle); check2(closed != 0);
+	}
+
+	#undef s_name_prefix_str
+	#undef s_name_prefix_len
+
+	#undef check
+	#undef check2
+}
+
 static BOOL PerformMountIoctl (MOUNT_STRUCT* pmount, LPDWORD pdwResult, BOOL useVolumeID, BYTE volumeID[VOLUME_ID_SIZE])
 {
 	if (useVolumeID)
@@ -8816,8 +8887,10 @@ static BOOL PerformMountIoctl (MOUNT_STRUCT* pmount, LPDWORD pdwResult, BOOL use
 		}
 	}
 	
-	return DeviceIoControl (hDriver, TC_IOCTL_MOUNT_VOLUME, pmount,
-			sizeof (MOUNT_STRUCT), pmount, sizeof (MOUNT_STRUCT), pdwResult, NULL);
+	pmount->bMountRemovable = 0;
+	BOOL r = DeviceIoControl (hDriver, TC_IOCTL_MOUNT_VOLUME, pmount, sizeof (MOUNT_STRUCT), pmount, sizeof (MOUNT_STRUCT), pdwResult, NULL);
+	set_dacl(pmount->nDosDriveNo);
+	return r;
 }
 
 // specific definitions and implementation for support of mount operation 
